@@ -16,6 +16,8 @@
  * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
 
+#include <math.h>
+
 #include "libssc-client-private.h"
 #include "libssc-common-private.h"
 #include "ssc-common.pb-c.h"
@@ -23,6 +25,37 @@
 #include "libssc-sensor.h"
 
 #define MAX_RETRIES 100
+
+/* Engineering tolerance for rounded float metadata, not an SSC API limit.
+ * Require unit, orthogonal rows and |det| ~= 1; accept legacy handedness. */
+static gboolean
+mount_matrix_is_valid (const gfloat matrix[3][3])
+{
+	const gdouble tolerance = 0.01;
+	gdouble determinant;
+
+	for (gsize row = 0; row < 3; row++) {
+		for (gsize col = 0; col < 3; col++) {
+			if (!isfinite (matrix[row][col]))
+				return FALSE;
+		}
+	}
+
+	for (gsize row = 0; row < 3; row++) {
+		for (gsize other = row; other < 3; other++) {
+			gdouble dot = 0.0;
+			for (gsize col = 0; col < 3; col++)
+				dot += (gdouble) matrix[row][col] * matrix[other][col];
+			if (fabs (dot - (row == other ? 1.0 : 0.0)) > tolerance)
+				return FALSE;
+		}
+	}
+
+	determinant = (gdouble) matrix[0][0] * ((gdouble) matrix[1][1] * matrix[2][2] - (gdouble) matrix[1][2] * matrix[2][1])
+	            - (gdouble) matrix[0][1] * ((gdouble) matrix[1][0] * matrix[2][2] - (gdouble) matrix[1][2] * matrix[2][0])
+	            + (gdouble) matrix[0][2] * ((gdouble) matrix[1][0] * matrix[2][1] - (gdouble) matrix[1][1] * matrix[2][0]);
+	return fabs (fabs (determinant) - 1.0) <= tolerance;
+}
 
 enum {
 	PROP_NAME = 1,
@@ -397,27 +430,66 @@ report_received (SSCClient *self, guint32 msg_id, guint64 uid_high, guint64 uid_
 					if (attr_msg->attr[i]->value_array->n_v == 1 && attr_msg->attr[i]->value_array->v[0]->has_i)
 						priv->stream_type = attr_msg->attr[i]->value_array->v[0]->i;
 					break;
-				case SSC_ATTRIBUTE_MOUNT_MATRIX:
+				case SSC_ATTRIBUTE_MOUNT_MATRIX: {
+					gsize n_values = attr_msg->attr[i]->value_array->n_v;
+					gsize stride = n_values > 9 ? 4 : 3;
+					gboolean all_zero = TRUE;
+					/* Opt-in metadata only: no QMI traces or unrelated attributes. */
+					if (g_strcmp0 (g_getenv ("LIBSSC_TRACE_PLACEMENT"), "1") == 0) {
+						GString *raw = g_string_new (NULL);
+						gsize float_count = 0;
+						for (gsize index = 0; index < n_values; index++) {
+							if (attr_msg->attr[i]->value_array->v[index]->has_f)
+								float_count++;
+						}
+						for (gsize index = 0; index < 12; index++) {
+							if (index > 0)
+								g_string_append (raw, ",");
+							if (index >= n_values)
+								g_string_append (raw, "missing");
+							else if (!attr_msg->attr[i]->value_array->v[index]->has_f)
+								g_string_append (raw, "non-float");
+							else {
+								gchar value[G_ASCII_DTOSTR_BUF_SIZE];
+								g_ascii_dtostr (value, sizeof (value), attr_msg->attr[i]->value_array->v[index]->f);
+								g_string_append (raw, value);
+							}
+						}
+						g_printerr ("libssc PLACEMENT data-type=%s count=%" G_GSIZE_FORMAT " floats=%" G_GSIZE_FORMAT " raw[0..11]=[%s]\n",
+							    priv->data_type, n_values, float_count, raw->str);
+						g_string_free (raw, TRUE);
+					}
 					mount_matrix_attribute_populated = TRUE;
-					/* 3x3 mount matrix has max 9 values but a 3x4 matrix is provided, use the first 9 values */
-					for (gsize j = 0; j < MIN(attr_msg->attr[i]->value_array->n_v, 9); j++) {
-						if (attr_msg->attr[i]->value_array->v[j]->has_f) {
-							priv->mount_matrix[j/3][j%3] = attr_msg->attr[i]->value_array->v[j]->f;
+					/* Start from identity for missing or non-float entries. */
+					memset (priv->mount_matrix, 0, sizeof (priv->mount_matrix));
+					for (gsize row = 0; row < 3; row++)
+						priv->mount_matrix[row][row] = 1.0f;
+
+					/* SSC placement is row-major 3x4 [R | t]; ignore translation.
+					 * Also accept legacy 3x3 attributes (and their partial forms). */
+					for (gsize row = 0; row < 3; row++) {
+						for (gsize col = 0; col < 3; col++) {
+							gsize index = row * stride + col;
+							if (index < n_values && attr_msg->attr[i]->value_array->v[index]->has_f)
+								priv->mount_matrix[row][col] = attr_msg->attr[i]->value_array->v[index]->f;
+							if (priv->mount_matrix[row][col] != 0.0f)
+								all_zero = FALSE;
 						}
 					}
 
-					/* Fallback to identity matrix in case matrix is all 0 */
-					gint sum = 0;
-					for (gsize k = 0; k < 9; k++)
-						sum += priv->mount_matrix[k/3][k%3];
-
-					if (sum == 0) {
+					/* Never apply placeholder/scaled/nonfinite metadata as orientation. */
+					if (all_zero || !mount_matrix_is_valid (priv->mount_matrix)) {
+						memset (priv->mount_matrix, 0, sizeof (priv->mount_matrix));
 						priv->mount_matrix[0][0] = 1.0;
 						priv->mount_matrix[1][1] = 1.0;
 						priv->mount_matrix[2][2] = 1.0;
-						g_warning ("Mount matrix provided by firmware is all 0, falling back to identity matrix!");
+						if (all_zero)
+							g_warning ("Mount matrix provided by firmware is all 0, falling back to identity matrix!");
+						else
+							g_warning ("Mount matrix provided by firmware is not a finite orthonormal orientation (tolerance 0.01), falling back to identity matrix!");
 					}
 					break;
+				}
 		       }
 		}
 

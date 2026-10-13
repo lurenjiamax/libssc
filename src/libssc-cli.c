@@ -150,7 +150,7 @@ gyroscope_close_cb (SSCSensorGyroscope *self)
 
 static void gyroscope_measurement (SSCSensorGyroscope *sensor, gfloat velocity_x, gfloat velocity_y, gfloat velocity_z, gpointer user_data)
 {
-	g_printf ("Gyroscope sensor measurement: X=%f Y=%f Z=%f m/s\n", velocity_x, velocity_y, velocity_z);
+	g_printf ("Gyroscope sensor measurement: X=%f Y=%f Z=%f rad/s\n", velocity_x, velocity_y, velocity_z);
 	fflush(stdout);
 }
 
