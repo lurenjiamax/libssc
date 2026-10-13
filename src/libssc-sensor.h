@@ -54,6 +54,7 @@ void		 ssc_sensor_new (gchar *data_type, GCancellable *cancellable, GAsyncReadyC
 SSCSensor 	*ssc_sensor_new_finish (GAsyncResult *result, GError **error);
 void		 ssc_sensor_open (SSCSensor *self, GCancellable *cancellable, GAsyncReadyCallback callback, gpointer user_data);
 gboolean	 ssc_sensor_open_finish (SSCSensor *self, GAsyncResult *result, GError **error);
+void		 ssc_sensor_set_sample_rate (SSCSensor *self, gfloat sample_rate);
 void		 ssc_sensor_close (SSCSensor *self, GCancellable *cancellable, GAsyncReadyCallback callback, gpointer user_data);
 gboolean	 ssc_sensor_close_finish (SSCSensor *self, GAsyncResult *result, GError **error);
 

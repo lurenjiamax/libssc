@@ -63,6 +63,7 @@ LIBSSC_0.4.0 {
 		ssc_sensor_close;
 		ssc_sensor_close_finish;
 		ssc_sensor_close_sync;
+		ssc_sensor_set_sample_rate;
 		ssc_sensor_get_type;
 		ssc_sensor_accelerometer_get_type;
 		ssc_sensor_compass_get_type;
